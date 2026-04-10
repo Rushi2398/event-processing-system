@@ -14,16 +14,19 @@ func main() {
 	groupID := "event-consumer-group"
 
 	consumer := service.NewConsumer(brokers, topic, groupID)
+	redisClient := service.NewRedisClient("localhost:6379")
+
+	go worker.StartRetryWorker(redisClient)
 
 	//Worker Pool
 	workerCount := 5
 	jobs := make(chan []byte, 100)
 
-	for i := range workerCount {
+	for i := 0; i < workerCount; i++ {
 		go func(id int) {
 			for msg := range jobs {
 				log.Printf("Worker %d processing message\n", id)
-				worker.ProcessEvent(msg)
+				worker.ProcessEvent(msg, redisClient)
 			}
 		}(i)
 	}
