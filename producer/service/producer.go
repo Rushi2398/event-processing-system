@@ -29,6 +29,11 @@ func (p *Producer) Publish(event model.Event) error {
 		return err
 	}
 
+	key := event.Key
+	if key == "" {
+		key = event.ID
+	}
+
 	err = p.writer.WriteMessages(context.Background(),
 		kafka.Message{
 			Key:   []byte(event.ID),

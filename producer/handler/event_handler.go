@@ -28,6 +28,10 @@ func (h *EventHandler) PublishEvent(c *gin.Context) {
 	req.ID = uuid.New().String()
 	req.Timestamp = time.Now().Unix()
 
+	if req.Key == "" {
+		req.Key = req.ID
+	}
+
 	if err := h.producer.Publish(req); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to publish"})
 		return
