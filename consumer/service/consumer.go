@@ -20,6 +20,10 @@ func NewConsumer(brokers []string, topic string, groupID string) *Consumer {
 	}
 }
 
-func (c *Consumer) ReadMessage(ctx context.Context) (kafka.Message, error) {
-	return c.reader.ReadMessage(ctx)
+func (c *Consumer) FetchMessage(ctx context.Context) (kafka.Message, error) {
+	return c.reader.FetchMessage(ctx)
+}
+
+func (c *Consumer) CommitMessage(ctx context.Context, msg kafka.Message) error {
+	return c.reader.CommitMessages(ctx, msg)
 }

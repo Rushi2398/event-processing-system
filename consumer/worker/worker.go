@@ -10,12 +10,12 @@ import (
 	"github.com/Rushi2398/event-processing-system/producer/model"
 )
 
-func ProcessEvent(msg []byte, redisClient *service.RedisClient) {
+func ProcessEvent(msg []byte, redisClient *service.RedisClient) error {
 	var event model.Event
 
 	if err := json.Unmarshal(msg, &event); err != nil {
 		log.Println("failed to parse event:", err)
-		return
+		return err
 	}
 
 	ctx := context.Background()
@@ -23,30 +23,20 @@ func ProcessEvent(msg []byte, redisClient *service.RedisClient) {
 	//Idempotency Check
 	processed, err := redisClient.IsProcessed(ctx, event.ID)
 	if err != nil {
-		log.Println("redis error:", err)
-		return
+		return err
 	}
 	if processed {
 		log.Println("event already processed:", event.ID)
-		return
+		return nil
 	}
 
 	// log.Printf("Processing event: ID=%s Type=%s Key=%s\n", event.ID, event.Type, event.Key)
 
 	if err := processBusinessLogic(event); err != nil {
-		log.Println("processing failed, pushing to retry:", err)
-
-		//Push to Retry Queue
-		err := redisClient.Client().LPush(ctx, "retry_queue", msg).Err()
-		if err != nil {
-			log.Println("failed to push retry:", err)
-		}
-		return
+		return err
 	}
 
-	if err := redisClient.MarkProcessed(ctx, event.ID); err != nil {
-		log.Println("failed to mark processed:", err)
-	}
+	return redisClient.MarkProcessed(ctx, event.ID)
 }
 
 func processBusinessLogic(event model.Event) error {

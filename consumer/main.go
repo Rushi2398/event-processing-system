@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 
 	"github.com/Rushi2398/event-processing-system/consumer/service"
 	"github.com/Rushi2398/event-processing-system/consumer/worker"
+	"github.com/Rushi2398/event-processing-system/producer/model"
+	"github.com/segmentio/kafka-go"
 )
 
 func main() {
@@ -34,11 +37,40 @@ func main() {
 
 	//Consume Messages
 	for {
-		msg, err := consumer.ReadMessage(context.Background())
+		msg, err := consumer.FetchMessage(context.Background())
 		if err != nil {
-			log.Println("error reading message:", err)
+			log.Println("error fetching message:", err)
 			continue
 		}
-		jobs <- msg.Value
+
+		go func(m kafka.Message) {
+			err := worker.ProcessEvent(m.Value, redisClient)
+
+			if err != nil {
+				log.Println("processing failed:", err)
+
+				// Retry logic
+				ctx := context.Background()
+
+				var event model.Event
+				json.Unmarshal(m.Value, &event)
+
+				event.Retry++
+				if event.Retry > 3 {
+					log.Println("sending to DLQ:", event.ID)
+					updated, _ := json.Marshal(event)
+					redisClient.Client().LPush(ctx, "dlq", updated)
+					return
+				}
+				updated, _ := json.Marshal(event)
+				redisClient.Client().LPush(ctx, "retry_queue", updated)
+
+				return
+
+			}
+			if err := consumer.CommitMessage(context.Background(), m); err != nil {
+				log.Println("failed to commit:", err)
+			}
+		}(msg)
 	}
 }
