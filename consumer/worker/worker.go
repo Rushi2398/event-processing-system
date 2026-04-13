@@ -3,14 +3,13 @@ package worker
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 
 	"github.com/Rushi2398/event-processing-system/consumer/service"
 	"github.com/Rushi2398/event-processing-system/producer/model"
 )
 
-func ProcessEvent(msg []byte, redisClient *service.RedisClient) error {
+func ProcessEvent(msg []byte, redisClient *service.RedisClient, pg *service.Postgres) error {
 	var event model.Event
 
 	if err := json.Unmarshal(msg, &event); err != nil {
@@ -32,24 +31,30 @@ func ProcessEvent(msg []byte, redisClient *service.RedisClient) error {
 
 	// log.Printf("Processing event: ID=%s Type=%s Key=%s\n", event.ID, event.Type, event.Key)
 
-	if err := processBusinessLogic(event); err != nil {
+	if err := processBusinessLogic(event, pg); err != nil {
 		return err
 	}
 
 	return redisClient.MarkProcessed(ctx, event.ID)
 }
 
-func processBusinessLogic(event model.Event) error {
+func processBusinessLogic(event model.Event, pg *service.Postgres) error {
 	// Simulate real work
 	log.Printf("Processing business logic for event: %s\n", event.ID)
 
-	// Simulate failure (for testing retry)
-	if event.Type == "fail_event" {
-		return fmt.Errorf("simulated failure")
+	payloadBytes, err := json.Marshal(event.Payload)
+	if err != nil {
+		return err
 	}
 
 	// TODO: Replace with real logic
 	// e.g. DB insert, API call, etc.
-
-	return nil
+	return pg.InsertEvent(
+		context.Background(),
+		event.ID,
+		event.Key,
+		event.Type,
+		payloadBytes,
+		event.Timestamp,
+	)
 }
