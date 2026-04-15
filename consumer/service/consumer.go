@@ -27,3 +27,7 @@ func (c *Consumer) FetchMessage(ctx context.Context) (kafka.Message, error) {
 func (c *Consumer) CommitMessage(ctx context.Context, msg kafka.Message) error {
 	return c.reader.CommitMessages(ctx, msg)
 }
+
+func (c *Consumer) Close() {
+	c.reader.Close()
+}

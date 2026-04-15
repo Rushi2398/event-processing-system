@@ -2,14 +2,15 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"os"
+	"os/signal"
 	"strconv"
+	"sync"
+	"syscall"
 
 	"github.com/Rushi2398/event-processing-system/consumer/service"
 	"github.com/Rushi2398/event-processing-system/consumer/worker"
-	"github.com/Rushi2398/event-processing-system/producer/model"
 	"github.com/joho/godotenv"
 	"github.com/segmentio/kafka-go"
 )
@@ -19,6 +20,8 @@ func main() {
 	if err != nil {
 		log.Println("No .env file found")
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
 	brokers := []string{os.Getenv("KAFKA_BROKERS")}
 	topic := os.Getenv("KAFKA_TOPIC")
 	groupID := os.Getenv("KAFKA_GROUP_ID")
@@ -30,7 +33,14 @@ func main() {
 		log.Fatal("failed to connect postgres:", err)
 
 	}
-	go worker.StartRetryWorker(redisClient, pg)
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		<-sigChan
+		log.Println("Shutdown signal received")
+		cancel()
+	}()
 
 	//Worker Pool
 	workerCountStr := os.Getenv("WORKER_COUNT")
@@ -38,13 +48,30 @@ func main() {
 
 	retryLimitStr := os.Getenv("RETRY_LIMIT")
 	retryLimit, _ := strconv.Atoi(retryLimitStr)
-	jobs := make(chan []byte, 100)
+
+	go worker.StartRetryWorker(ctx, redisClient, pg, &wg, retryLimit)
+	jobs := make(chan kafka.Message, 100)
 
 	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
 		go func(id int) {
+			defer wg.Done()
 			for msg := range jobs {
 				log.Printf("Worker %d processing message\n", id)
-				worker.ProcessEvent(msg, redisClient, pg)
+
+				err := worker.ProcessEvent(msg.Value, redisClient, pg)
+
+				if err != nil {
+					log.Println("processing failed:", err)
+					worker.HandleRetry(msg.Value, redisClient, retryLimit)
+
+					continue
+				}
+
+				// commit ONLY after success
+				if err := consumer.CommitMessage(ctx, msg); err != nil {
+					log.Println("commit failed:", err)
+				}
 			}
 		}(i)
 	}
@@ -52,40 +79,31 @@ func main() {
 
 	//Consume Messages
 	for {
-		msg, err := consumer.FetchMessage(context.Background())
-		if err != nil {
-			log.Println("error fetching message:", err)
-			continue
-		}
+		select {
+		case <-ctx.Done():
+			log.Println("Stopping Consumer...")
+			close(jobs)
+			goto shutdown
 
-		go func(m kafka.Message) {
-			err := worker.ProcessEvent(m.Value, redisClient, pg)
-
+		default:
+			msg, err := consumer.FetchMessage(ctx)
 			if err != nil {
-				log.Println("processing failed:", err)
-
-				// Retry logic
-				ctx := context.Background()
-
-				var event model.Event
-				json.Unmarshal(m.Value, &event)
-
-				event.Retry++
-				if event.Retry > retryLimit {
-					log.Println("sending to DLQ:", event.ID)
-					updated, _ := json.Marshal(event)
-					redisClient.Client().LPush(ctx, "dlq", updated)
-					return
+				if ctx.Err() != nil {
+					goto shutdown
 				}
-				updated, _ := json.Marshal(event)
-				redisClient.Client().LPush(ctx, "retry_queue", updated)
-
-				return
-
+				log.Println("error fetching message:", err)
+				continue
 			}
-			if err := consumer.CommitMessage(context.Background(), m); err != nil {
-				log.Println("failed to commit:", err)
-			}
-		}(msg)
+			jobs <- msg
+		}
 	}
+shutdown:
+	log.Println("Waiting for workers to finish...")
+	wg.Wait()
+
+	log.Println("Closing resources...")
+	consumer.Close()
+	pg.Close()
+
+	log.Println("Shutdown complete")
 }

@@ -2,44 +2,37 @@ package worker
 
 import (
 	"context"
-	"encoding/json"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/Rushi2398/event-processing-system/consumer/service"
-	"github.com/Rushi2398/event-processing-system/producer/model"
 )
 
-func StartRetryWorker(redisClient *service.RedisClient, pg *service.Postgres) {
-	for {
-		ctx := context.Background()
+func StartRetryWorker(ctx context.Context, redisClient *service.RedisClient, pg *service.Postgres, wg *sync.WaitGroup, retryLimit int) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				log.Println("Stopping retry worker...")
+				return
+			default:
+				msg, err := redisClient.Client().RPop(ctx, "retry_queue").Result()
+				if err != nil {
+					time.Sleep(2 * time.Second)
+					continue
+				}
 
-		msg, err := redisClient.Client().RPop(ctx, "retry_queue").Result()
-		if err != nil {
-			time.Sleep(2 * time.Second)
-			continue
-		}
+				log.Println("Retrying message")
+				err = ProcessEvent([]byte(msg), redisClient, pg)
+				if err != nil {
+					log.Println("retry failed again:", err)
 
-		log.Println("Retrying message")
-		err = ProcessEvent([]byte(msg), redisClient, pg)
-		if err != nil {
-			log.Println("retry failed again:", err)
-
-			var event model.Event
-			json.Unmarshal([]byte(msg), &event)
-
-			event.Retry++
-
-			if event.Retry > 3 {
-				log.Println("sending to DLQ from retry worker:", event.ID)
-
-				updated, _ := json.Marshal(event)
-				redisClient.Client().LPush(ctx, "dlq", updated)
-				continue
+					HandleRetry([]byte(msg), redisClient, retryLimit)
+				}
 			}
-
-			updated, _ := json.Marshal(event)
-			redisClient.Client().LPush(ctx, "retry_queue", updated)
 		}
-	}
+	}()
 }

@@ -27,3 +27,7 @@ func (p *Postgres) InsertEvent(ctx context.Context, eventID, key, eventType stri
 	)
 	return err
 }
+
+func (p *Postgres) Close() {
+	p.db.Close()
+}
