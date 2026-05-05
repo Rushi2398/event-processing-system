@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"log"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -21,7 +22,10 @@ func StartRetryWorker(ctx context.Context, redisClient *service.RedisClient, pg 
 			default:
 				msg, err := redisClient.Client().RPop(ctx, "retry_queue").Result()
 				if err != nil {
-					time.Sleep(2 * time.Second)
+					backoff := time.Duration(100*(1<<retryLimit)) * time.Millisecond
+					jitter := time.Duration(rand.Intn(100)) * time.Millisecond
+
+					time.Sleep(backoff + jitter)
 					continue
 				}
 

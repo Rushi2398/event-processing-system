@@ -20,14 +20,23 @@ func ProcessEvent(msg []byte, redisClient *service.RedisClient, pg *service.Post
 	ctx := context.Background()
 
 	//Idempotency Check
-	processed, err := redisClient.IsProcessed(ctx, event.ID)
+
+	locked, err := redisClient.TryLock(ctx, event.ID)
 	if err != nil {
 		return err
 	}
-	if processed {
-		log.Println("event already processed:", event.ID)
+	if !locked {
+		log.Println("event already being processed:", event.ID)
 		return nil
 	}
+	// processed, err := redisClient.IsProcessed(ctx, event.ID)
+	// if err != nil {
+	// 	return err
+	// }
+	// if processed {
+	// 	log.Println("event already processed:", event.ID)
+	// 	return nil
+	// }
 
 	// log.Printf("Processing event: ID=%s Type=%s Key=%s\n", event.ID, event.Type, event.Key)
 
