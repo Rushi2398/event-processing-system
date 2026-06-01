@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/Rushi2398/event-processing-system/consumer/service"
 	"github.com/Rushi2398/event-processing-system/consumer/worker"
@@ -26,6 +27,8 @@ type config struct {
 	workerCount      int
 	retryWorkerCount int
 	retryLimit       int
+	batchSize        int
+	batchFlushMs     int
 }
 
 func main() {
@@ -37,7 +40,9 @@ func main() {
 	defer cancel()
 
 	var wg sync.WaitGroup
+	var batcherWg sync.WaitGroup
 
+	// --- Infrastructure clients ---
 	consumer := service.NewConsumer(cfg.brokers, cfg.topic, cfg.groupID)
 	redisClient := service.NewRedisClient(cfg.redisAddr)
 	pg, err := service.NewPostgres(cfg.postgresURL)
@@ -45,6 +50,11 @@ func main() {
 		log.Fatalf("failed to connect to postgres: %v", err)
 	}
 
+	// --- Batcher ---
+	batcher := worker.NewBatcher(pg, cfg.batchSize, time.Duration(cfg.batchFlushMs)*time.Millisecond)
+	batcher.Start(&batcherWg)
+
+	// --- Graceful shutdown ---
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
@@ -54,10 +64,11 @@ func main() {
 		cancel()
 	}()
 
+	// --- Retry subsystem ---
 	// The scheduler moves due events from the sorted set into retry_queue.
 	// The retry worker pool drains retry_queue via BRPop.
 	worker.StartRetryScheduler(ctx, redisClient, &wg)
-	worker.StartRetryWorkers(ctx, redisClient, pg, &wg, cfg.retryLimit, cfg.retryWorkerCount)
+	worker.StartRetryWorkers(ctx, redisClient, batcher, &wg, cfg.retryLimit, cfg.retryWorkerCount)
 
 	jobs := make(chan kafka.Message, cfg.workerCount*2)
 
@@ -69,7 +80,7 @@ func main() {
 			for msg := range jobs {
 				log.Printf("[worker-%d] processing message offset=%d", id, msg.Offset)
 
-				if err := worker.ProcessEvent(msg.Value, redisClient, pg); err != nil {
+				if err := worker.ProcessEvent(ctx, msg.Value, redisClient, batcher); err != nil {
 					log.Printf("[worker-%d] processing failed: %v", id, err)
 
 					if hErr := worker.HandleRetry(ctx, msg.Value, redisClient, cfg.retryLimit); hErr != nil {
@@ -91,7 +102,7 @@ func main() {
 
 	log.Println("Consumer started — waiting for messages...")
 
-	//Consume Messages
+	// --- Main consume loop ---
 	for {
 		select {
 		case <-ctx.Done():
@@ -110,15 +121,20 @@ func main() {
 		}
 	}
 shutdown:
-	log.Println("Draining job queue and waiting for workers to finish...")
+	log.Println("draining job queue and waiting for workers to finish...")
 	close(jobs)
 	wg.Wait()
 
-	log.Println("Closing resources...")
+	// Stop the batcher only after all workers have finished their last Submit call. Calling Stop() while a Submit is in-flight would panic.
+	log.Println("stopping batcher and flushing remaining events...")
+	batcher.Stop()
+	batcherWg.Wait()
+
+	log.Println("closing resources...")
 	consumer.Close()
 	pg.Close()
 
-	log.Println("Shutdown complete")
+	log.Println("shutdown complete")
 }
 
 // mustLoadConfig reads and validates all required environment variables.
@@ -135,6 +151,8 @@ func mustLoadConfig() config {
 
 	cfg.workerCount = mustEnvInt("WORKER_COUNT", 1, 1000)
 	cfg.retryLimit = mustEnvInt("RETRY_LIMIT", 1, 20)
+	cfg.batchSize = mustEnvIntDefault("BATCH_SIZE", 100, 1, 1000)
+	cfg.batchFlushMs = mustEnvIntDefault("BATCH_FLUSH_MS", 500, 10, 10000)
 
 	// RETRY_WORKER_COUNT defaults to 25% of main worker count if not set.
 	if v := os.Getenv("RETRY_WORKER_COUNT"); v != "" {
@@ -146,8 +164,8 @@ func mustLoadConfig() config {
 		}
 	}
 
-	log.Printf("Config: workers=%d retry_workers=%d retry_limit=%d topic=%s",
-		cfg.workerCount, cfg.retryWorkerCount, cfg.retryLimit, cfg.topic)
+	log.Printf("config: workers=%d retry_workers=%d retry_limit=%d batch_size=%d batch_flush_ms=%d topic=%s",
+		cfg.workerCount, cfg.retryWorkerCount, cfg.retryLimit, cfg.batchSize, cfg.batchFlushMs, cfg.topic)
 
 	return cfg
 }
@@ -164,6 +182,22 @@ func mustEnvInt(key string, min, max int) int {
 	raw := os.Getenv(key)
 	if raw == "" {
 		log.Fatalf("required environment variable %s is not set", key)
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		log.Fatalf("environment variable %s must be an integer, got: %q", key, raw)
+	}
+	if v < min || v > max {
+		log.Fatalf("environment variable %s must be between %d and %d, got: %d", key, min, max, v)
+	}
+	return v
+}
+
+// mustEnvIntDefault returns the parsed integer value of key, or defaultVal if the variable is not set. Fatals if the variable is set but invalid.
+func mustEnvIntDefault(key string, defaultVal, min, max int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return defaultVal
 	}
 	v, err := strconv.Atoi(raw)
 	if err != nil {

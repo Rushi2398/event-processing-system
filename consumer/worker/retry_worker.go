@@ -56,8 +56,8 @@ func StartRetryScheduler(ctx context.Context, redisClient *service.RedisClient, 
 //
 // The retry worker pool is intentionally separate from the main Kafka worker
 // pool so retry storms don't starve fresh events.
-func StartRetryWorkers(ctx context.Context, redisClient *service.RedisClient, pg *service.Postgres,
-	wg *sync.WaitGroup, retryLimit int, workerCount int) {
+func StartRetryWorkers(ctx context.Context, redisClient *service.RedisClient,
+	batcher *BatchInserter, wg *sync.WaitGroup, retryLimit int, workerCount int) {
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go func(id int) {
@@ -83,7 +83,7 @@ func StartRetryWorkers(ctx context.Context, redisClient *service.RedisClient, pg
 				}
 
 				log.Printf("[retry-worker-%d] processing retry message", id)
-				if err := ProcessEvent(msg, redisClient, pg); err != nil {
+				if err := ProcessEvent(ctx, msg, redisClient, batcher); err != nil {
 					log.Printf("[retry-worker-%d] processing failed: %v", id, err)
 
 					if hErr := HandleRetry(ctx, msg, redisClient, retryLimit); hErr != nil {
