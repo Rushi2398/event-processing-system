@@ -13,8 +13,7 @@ type Postgres struct {
 }
 
 // EventRow holds the fields for a single event to be inserted into the DB.
-// Defined here (alongside the DB layer) so the batcher and worker don't need
-// to reach into each other's packages for this type.
+// Defined here (alongside the DB layer) so the batcher and worker don't need to reach into each other's packages for this type.
 type EventRow struct {
 	ID           string
 	Key          string
@@ -31,12 +30,8 @@ func NewPostgres(connStr string) (*Postgres, error) {
 	return &Postgres{db: db}, nil
 }
 
-// InsertEventBatch inserts multiple events in a single DB round-trip using a
-// dynamically built multi-row INSERT. ON CONFLICT DO NOTHING handles duplicate
-// event IDs gracefully — the insert skips them without returning an error.
-//
-// If the batch fails, the caller is responsible for retrying each event
-// individually via the retry queue.
+// InsertEventBatch inserts multiple events in a single DB round-trip using a dynamically built multi-row INSERT. ON CONFLICT DO NOTHING handles duplicate event IDs gracefully — the insert skips them without returning an error.
+// If the batch fails, the caller is responsible for retrying each event individually via the retry queue.
 func (p *Postgres) InsertEventBatch(ctx context.Context, rows []EventRow) error {
 	if len(rows) == 0 {
 		return nil
@@ -60,8 +55,7 @@ func (p *Postgres) InsertEventBatch(ctx context.Context, rows []EventRow) error 
 	return err
 }
 
-// InsertEvent inserts a single event. Kept for use in tests and one-off cases
-// where batching is not appropriate.
+// InsertEvent inserts a single event. Kept for use in tests and one-off cases where batching is not appropriate.
 func (p *Postgres) InsertEvent(ctx context.Context, eventID, key, eventType string, payload []byte, ts int64) error {
 	_, err := p.db.Exec(ctx,
 		`INSERT INTO events (id, key, type, payload, created_at)
@@ -70,6 +64,11 @@ func (p *Postgres) InsertEvent(ctx context.Context, eventID, key, eventType stri
 		eventID, key, eventType, payload, ts,
 	)
 	return err
+}
+
+// Ping checks Postgres connectivity. Used by the readiness health check.
+func (p *Postgres) Ping(ctx context.Context) error {
+	return p.db.Ping(ctx)
 }
 
 func (p *Postgres) Close() {

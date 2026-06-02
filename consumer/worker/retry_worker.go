@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -29,7 +30,7 @@ func StartRetryScheduler(ctx context.Context, redisClient *service.RedisClient, 
 		ticker := time.NewTicker(schedulerInterval)
 		defer ticker.Stop()
 
-		log.Println("[retry-scheduler] started")
+		slog.Info("[retry-scheduler] started")
 		for {
 			select {
 			case <-ctx.Done():
@@ -38,11 +39,11 @@ func StartRetryScheduler(ctx context.Context, redisClient *service.RedisClient, 
 			case <-ticker.C:
 				n, err := redisClient.MoveDueRetries(ctx)
 				if err != nil && ctx.Err() == nil {
-					log.Printf("[retry-scheduler] error moving due retries: %v", err)
+					slog.Error("[retry-scheduler] error moving due retries: ", "error", err)
 					continue
 				}
 				if n > 0 {
-					log.Printf("[retry-scheduler] moved %d event(s) to retry_queue", n)
+					slog.Info("[retry-scheduler] moved event(s) to retry_queue", "count", n)
 				}
 			}
 		}
@@ -62,18 +63,18 @@ func StartRetryWorkers(ctx context.Context, redisClient *service.RedisClient,
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			log.Printf("[retry-worker-%d] started", id)
+			slog.Info("[retry-worker] started", "worker_id", id)
 			for {
 				// BRPop blocks for brpopTimeout, then returns a timeout error.
 				// We loop so we can check ctx.Done() between polls.
 				msg, err := redisClient.PopRetryMessage(ctx, brpopTimeout)
 				if err != nil {
 					if ctx.Err() != nil {
-						log.Printf("[retry-worker-%d] stopping", id)
+						slog.Info("[retry-worker] stopping", "worker_id", id)
 						return
 					}
 					// Timeout or transient Redis error — loop and try again.
-					log.Printf("[retry-worker-%d] error popping retry message: %v", id, err)
+					slog.Error("[retry-worker] error popping message", "worker_id", id, "error", err)
 					continue
 				}
 				// BRPop returns [key, value].
@@ -84,12 +85,11 @@ func StartRetryWorkers(ctx context.Context, redisClient *service.RedisClient,
 
 				log.Printf("[retry-worker-%d] processing retry message", id)
 				if err := ProcessEvent(ctx, msg, redisClient, batcher); err != nil {
-					log.Printf("[retry-worker-%d] processing failed: %v", id, err)
+					slog.Error("[retry-worker] processing failed", "worker_id", id, "error", err)
 
 					if hErr := HandleRetry(ctx, msg, redisClient, retryLimit); hErr != nil {
 						// If HandleRetry itself fails (e.g. Redis down), log loudly.
-						// In Phase 3 this becomes a Prometheus counter + alert.
-						log.Printf("[retry-worker-%d] CRITICAL: failed to handle retry: %v", id, hErr)
+						slog.Error("[retry-worker] CRITICAL: failed to handle retry", "worker_id", id, "error", hErr)
 					}
 				}
 			}

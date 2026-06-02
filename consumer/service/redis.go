@@ -104,6 +104,22 @@ func (r *RedisClient) PopRetryMessage(ctx context.Context, timeout time.Duration
 	return []byte(results[1]), nil
 }
 
+// Ping checks Redis connectivity. Used by the readiness health check.
+func (r *RedisClient) Ping(ctx context.Context) error {
+	return r.client.Ping(ctx).Err()
+}
+
+// RetryQueueDepth returns the current number of events in the retry queue.
+// Used by the queue depth poller to update Prometheus gauges.
+func (r *RedisClient) RetryQueueDepth(ctx context.Context) (int64, error) {
+	return r.client.LLen(ctx, retryQueueKey).Result()
+}
+
+// DLQDepth returns the current number of events in the dead-letter queue.
+func (r *RedisClient) DLQDepth(ctx context.Context) (int64, error) {
+	return r.client.LLen(ctx, dlqKey).Result()
+}
+
 func (r *RedisClient) Client() *redis.Client {
 	return r.client
 }

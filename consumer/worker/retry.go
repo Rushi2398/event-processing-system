@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/rand"
+	"strconv"
 	"time"
 
+	"github.com/Rushi2398/event-processing-system/consumer/observability"
 	"github.com/Rushi2398/event-processing-system/consumer/service"
 	"github.com/Rushi2398/event-processing-system/producer/model"
 )
@@ -36,19 +38,31 @@ func HandleRetry(ctx context.Context, msg []byte, redisClient *service.RedisClie
 		return fmt.Errorf("HandleRetry: failed to marshal event %s: %w", event.ID, err)
 	}
 	if event.Retry > retryLimit {
-		log.Printf("[retry] event %s exceeded retry limit (%d/%d), sending to DLQ", event.ID, event.Retry-1, retryLimit)
+		slog.Warn("[retry] event exceeded retry limit, sending to DLQ",
+			"event_id", event.ID,
+			"retry", event.Retry-1,
+			"retry_limit", retryLimit,
+		)
 		if err := redisClient.PushToDLQ(ctx, updated); err != nil {
 			return fmt.Errorf("HandleRetry: failed to push event %s to DLQ: %w", event.ID, err)
 		}
+		observability.DLQEventsTotal.Inc()
 		return nil
 	}
 
 	delay := retryDelay(event.Retry)
-	log.Printf("[retry] scheduling retry %d/%d for event %s in %s", event.Retry, retryLimit, event.ID, delay.Round(time.Millisecond))
+	slog.Info("scheduling retry",
+		"event_id", event.ID,
+		"attempt", event.Retry,
+		"retry_limit", retryLimit,
+		"delay_ms", delay.Milliseconds(),
+	)
 
 	if err := redisClient.ScheduleRetry(ctx, updated, delay); err != nil {
 		return fmt.Errorf("HandleRetry: failed to schedule retry for event %s: %w", event.ID, err)
 	}
+
+	observability.RetryAttemptsTotal.WithLabelValues(strconv.Itoa(event.Retry)).Inc()
 	return nil
 
 }

@@ -3,9 +3,11 @@ package worker
 import (
 	"context"
 	"log"
+	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/Rushi2398/event-processing-system/consumer/observability"
 	"github.com/Rushi2398/event-processing-system/consumer/service"
 )
 
@@ -81,14 +83,30 @@ func (b *BatchInserter) Start(batcherWg *sync.WaitGroup) {
 			for i, s := range pending {
 				rows[i] = s.row
 			}
+
+			// Record batch size before the insert.
+			observability.BatchSize.Observe(float64(len(pending)))
+
+			flushStart := time.Now()
+			err := b.pg.InsertEventBatch(context.Background(), rows)
+			flushDuration := time.Since(flushStart)
+
+			observability.BatchFlushDuration.Observe(flushDuration.Seconds())
+
 			// Use a background context here — by the time Stop() is called
 			// and the channel is closed, the main ctx may already be cancelled.
 			// We still want to commit the final batch.
-			err := b.pg.InsertEventBatch(context.Background(), rows)
 			if err != nil {
-				log.Printf("[batcher] batch insert failed (%d events): %v", len(pending), err)
+				slog.Error("[batcher] batch insert failed",
+					"batch_size", len(pending),
+					"duration_ms", flushDuration.Milliseconds(),
+					"error", err,
+				)
 			} else {
-				log.Printf("[batcher] flushed %d event(s) to DB", len(pending))
+				slog.Info("batch flushed",
+					"batch_size", len(pending),
+					"duration_ms", flushDuration.Milliseconds(),
+				)
 			}
 
 			for _, s := range pending {
@@ -98,7 +116,7 @@ func (b *BatchInserter) Start(batcherWg *sync.WaitGroup) {
 			pending = pending[:0]
 		}
 
-		log.Printf("[batcher] started")
+		slog.Info("[batcher] started", "batch_size", b.batchSize, "flush_interval", b.flushInterval)
 		for {
 			select {
 			case s, ok := <-b.input:

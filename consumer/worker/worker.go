@@ -3,8 +3,10 @@ package worker
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
+	"time"
 
+	"github.com/Rushi2398/event-processing-system/consumer/observability"
 	"github.com/Rushi2398/event-processing-system/consumer/service"
 	"github.com/Rushi2398/event-processing-system/producer/model"
 )
@@ -18,26 +20,31 @@ import (
 //
 // ctx is the main application context. Cancellation (shutdown) causes Submit to return immediately so workers don't get stuck waiting on a final flush.
 func ProcessEvent(ctx context.Context, msg []byte, redisClient *service.RedisClient, batcher *BatchInserter) error {
+	start := time.Now()
 	var event model.Event
 
 	if err := json.Unmarshal(msg, &event); err != nil {
-		log.Printf("[worker] failed to parse event: %v", err)
+		slog.Error("[worker] failed to parse event", "error", err)
+		observability.EventsProcessedTotal.WithLabelValues("failed").Inc()
 		return err
 	}
 
 	//Idempotency Check
 	locked, err := redisClient.TryLock(ctx, event.ID)
 	if err != nil {
+		observability.EventsProcessedTotal.WithLabelValues("failed").Inc()
 		return err
 	}
 
 	if !locked {
-		log.Printf("[worker] event %s already being processed, skipping", event.ID)
+		slog.Info("[worker] event already being processed, skipping", "event_id", event.ID)
+		observability.EventsProcessedTotal.WithLabelValues("duplicate").Inc()
 		return nil
 	}
 
 	payloadBytes, err := json.Marshal(event.Payload)
 	if err != nil {
+		observability.EventsProcessedTotal.WithLabelValues("failed").Inc()
 		return err
 	}
 
@@ -48,8 +55,21 @@ func ProcessEvent(ctx context.Context, msg []byte, redisClient *service.RedisCli
 		PayloadBytes: payloadBytes,
 		Timestamp:    event.Timestamp,
 	}); err != nil {
+		observability.EventsProcessedTotal.WithLabelValues("failed").Inc()
+		observability.EventProcessingDuration.WithLabelValues("failed").Observe(time.Since(start).Seconds())
 		return err
 	}
 
-	return redisClient.MarkProcessed(ctx, event.ID)
+	if err := redisClient.MarkProcessed(ctx, event.ID); err != nil {
+		// Non-fatal: the event was inserted. Log and continue — worst case
+		// a duplicate is skipped next time via TryLock.
+		slog.Warn("failed to mark event as processed", "event_id", event.ID, "error", err)
+	}
+
+	duration := time.Since(start)
+	observability.EventsProcessedTotal.WithLabelValues("success").Inc()
+	observability.EventProcessingDuration.WithLabelValues("success").Observe(duration.Seconds())
+	slog.Info("event processed", "event_id", event.ID, "duration_ms", duration.Milliseconds(), "retry", event.Retry)
+
+	return nil
 }
