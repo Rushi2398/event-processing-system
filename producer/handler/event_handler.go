@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -26,16 +27,23 @@ func (h *EventHandler) PublishEvent(c *gin.Context) {
 	}
 
 	req.ID = uuid.New().String()
-	req.Timestamp = time.Now().Unix()
+	req.Timestamp = time.Now().UnixMilli()
 
 	if req.Key == "" {
 		req.Key = req.ID
 	}
 
-	if err := h.producer.Publish(req); err != nil {
+	if err := h.producer.Publish(c.Request.Context(), req); err != nil {
+		slog.Error("failed to publish event", "event_id", req.ID, "type", req.Type, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to publish"})
 		return
 	}
+
+	slog.Info("event published",
+		"event_id", req.ID,
+		"type", req.Type,
+		"key", req.Key,
+	)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "event published",
